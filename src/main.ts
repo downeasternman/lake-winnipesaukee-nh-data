@@ -1,78 +1,98 @@
 import "./styles.css";
-import locationConfig from "./locationConfig";
-import type { ChartSeries, MetricKey } from "./types";
+import { decimate, renderMetricChart } from "./charts";
+import { fetchLake, type IvRequest, type PresetPeriod } from "./usgs";
+import type { Chart } from "chart.js";
 
-const metricLabels: Record<MetricKey, { label: string; unit: string }> = {
-  temperature: { label: "Water Temperature", unit: "F" },
-  lakeLevel: { label: "Lake Level", unit: "ft" },
-  inflow: { label: "Inflow", unit: "cfs" },
-  outflow: { label: "Outflow", unit: "cfs" },
-  waveHeight: { label: "Wave Height", unit: "ft" }
+const app = document.querySelector<HTMLDivElement>("#app");
+if (!app) throw new Error("#app missing");
+
+app.innerHTML = `
+  <header class="app-header">
+    <h1>Lake Winnipesaukee, NH</h1>
+    <p class="tagline">USGS lake level, in/out flow & water temperature</p>
+  </header>
+  <section class="controls" aria-label="Time range">
+    <div class="presets">
+      <span class="label">Range</span>
+      <button type="button" class="chip" data-period="P1D">1 day</button>
+      <button type="button" class="chip chip-active" data-period="P7D">7 days</button>
+      <button type="button" class="chip" data-period="P30D">30 days</button>
+    </div>
+    <div class="custom-range">
+      <span class="label">Custom</span>
+      <input type="date" id="startDate" aria-label="Start date" />
+      <span class="dash">–</span>
+      <input type="date" id="endDate" aria-label="End date" />
+      <button type="button" class="btn-apply" id="applyCustom">Apply</button>
+    </div>
+    <div class="refresh-row"><button type="button" class="btn-refresh" id="refreshBtn">Refresh now</button><span class="refresh-info" id="refreshInfo"></span></div>
+    <p class="range-summary" id="rangeSummary"></p>
+    <p class="form-error" id="formError" role="alert" hidden></p>
+  </section>
+  <main class="cards">
+    <article class="card"><header><h2>Water temperature</h2><p class="meta" id="metaT"></p></header><div class="chart-wrap"><div class="loading" id="loadT">Loading…</div><canvas id="chartT" height="220"></canvas></div><p class="footnote" id="footT"></p></article>
+    <article class="card"><header><h2>Lake level</h2><p class="meta" id="metaL"></p></header><div class="chart-wrap"><div class="loading" id="loadL">Loading…</div><canvas id="chartL" height="220"></canvas></div><p class="footnote" id="footL"></p></article>
+    <article class="card"><header><h2>Inflow</h2><p class="meta" id="metaI"></p></header><div class="chart-wrap"><div class="loading" id="loadI">Loading…</div><canvas id="chartI" height="220"></canvas></div><p class="footnote" id="footI"></p></article>
+    <article class="card"><header><h2>Outflow</h2><p class="meta" id="metaO"></p></header><div class="chart-wrap"><div class="loading" id="loadO">Loading…</div><canvas id="chartO" height="220"></canvas></div><p class="footnote" id="footO"></p></article>
+  </main>
+  <footer class="app-footer"><p>Data: U.S. Geological Survey near real-time feeds. Temperature chart is always shown first.</p></footer>
+`;
+
+let req: IvRequest = { kind: "preset", period: "P7D" };
+let charts: Array<Chart<"line"> | null> = [null, null, null, null];
+const el = {
+  rangeSummary: document.getElementById("rangeSummary")!,
+  formError: document.getElementById("formError")!,
+  loadT: document.getElementById("loadT")!, loadL: document.getElementById("loadL")!, loadI: document.getElementById("loadI")!, loadO: document.getElementById("loadO")!,
+  chartT: document.getElementById("chartT") as HTMLCanvasElement, chartL: document.getElementById("chartL") as HTMLCanvasElement, chartI: document.getElementById("chartI") as HTMLCanvasElement, chartO: document.getElementById("chartO") as HTMLCanvasElement,
+  metaT: document.getElementById("metaT")!, metaL: document.getElementById("metaL")!, metaI: document.getElementById("metaI")!, metaO: document.getElementById("metaO")!,
+  footT: document.getElementById("footT")!, footL: document.getElementById("footL")!, footI: document.getElementById("footI")!, footO: document.getElementById("footO")!,
+  startDate: document.getElementById("startDate") as HTMLInputElement, endDate: document.getElementById("endDate") as HTMLInputElement
 };
-
-function makeDemoSeries(metric: MetricKey): ChartSeries {
-  const now = Date.now();
-  const points = Array.from({ length: 24 }).map((_, idx) => {
-    const ts = now - (23 - idx) * 60 * 60 * 1000;
-    const base = metric === "temperature" ? 58 : metric === "waveHeight" ? 2.5 : 1200;
-    const wave = Math.sin(idx / 3) * (metric === "temperature" ? 4 : 0.8);
-    return { ts, value: Number((base + wave).toFixed(2)) };
-  });
-
-  return {
-    metric,
-    label: metricLabels[metric].label,
-    unit: metricLabels[metric].unit,
-    points
-  };
+const setBusy = (busy: boolean) => [el.loadT, el.loadL, el.loadI, el.loadO].forEach((node) => (node.hidden = !busy));
+function summarizeRange(): string {
+  if (req.kind === "preset") {
+    const labels: Record<PresetPeriod, string> = { P1D: "Last 24 hours", P7D: "Last 7 days", P30D: "Last 30 days" };
+    el.rangeSummary.textContent = labels[req.period];
+  } else el.rangeSummary.textContent = `${req.start.toLocaleDateString()} — ${req.end.toLocaleDateString()}`;
+  return el.rangeSummary.textContent || "";
 }
-
-function drawSparkline(points: Array<{ value: number }>): string {
-  const values = points.map((p) => p.value);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = Math.max(max - min, 0.01);
-  const width = 100;
-  const height = 36;
-  const coords = points.map((p, i) => {
-    const x = (i / (points.length - 1)) * width;
-    const y = height - ((p.value - min) / range) * height;
-    return `${x},${y}`;
-  });
-  return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"><polyline points="${coords.join(
-    " "
-  )}" /></svg>`;
+async function load(): Promise<void> {
+  el.formError.hidden = true;
+  charts.forEach((c) => c?.destroy());
+  setBusy(true);
+  const summary = summarizeRange();
+  el.metaT.textContent = `USGS temperature · ${summary}`; el.metaL.textContent = `USGS lake level · ${summary}`; el.metaI.textContent = `USGS inflow · ${summary}`; el.metaO.textContent = `USGS outflow · ${summary}`;
+  try {
+    const data = await fetchLake(req);
+    const t = decimate(data.temperature), l = decimate(data.lakeLevel), i = decimate(data.inflow), o = decimate(data.outflow);
+    charts[0] = renderMetricChart(el.chartT, t, "Water temperature", "rgb(14, 116, 144)", "°F");
+    charts[1] = renderMetricChart(el.chartL, l, "Lake level", "rgb(30, 64, 175)", "ft");
+    charts[2] = renderMetricChart(el.chartI, i, "Inflow", "rgb(37, 99, 235)", "ft³/s");
+    charts[3] = renderMetricChart(el.chartO, o, "Outflow", "rgb(59, 130, 246)", "ft³/s");
+    el.footT.textContent = t.length ? `Points: ${t.length}` : "No temperature data returned.";
+    el.footL.textContent = l.length ? `Points: ${l.length}` : "No lake level data returned.";
+    el.footI.textContent = i.length ? `Points: ${i.length}` : "No inflow data returned.";
+    el.footO.textContent = o.length ? `Points: ${o.length}` : "No outflow data returned.";
+  } catch (e) {
+    el.formError.textContent = e instanceof Error ? e.message : "Request failed";
+    el.formError.hidden = false;
+  } finally { setBusy(false); }
 }
-
-function renderApp(): void {
-  const root = document.querySelector<HTMLDivElement>("#app");
-  if (!root) return;
-
-  const chartOrder = locationConfig.chartOrder;
-  const first = chartOrder[0];
-  if (first !== "temperature") {
-    throw new Error("Temperature must be first chart.");
-  }
-
-  const cards = chartOrder
-    .map((metric) => {
-      const series = makeDemoSeries(metric);
-      const latest = series.points[series.points.length - 1].value;
-      return `<article class="card">
-        <h2>${series.label}</h2>
-        <p class="value">${latest} ${series.unit}</p>
-        <div class="chart">${drawSparkline(series.points)}</div>
-      </article>`;
-    })
-    .join("");
-
-  root.innerHTML = `<main>
-    <header>
-      <h1>${locationConfig.displayName}</h1>
-      <p>Live-ready layout. Wire final NOAA/USGS IDs in location config.</p>
-    </header>
-    <section class="grid">${cards}</section>
-  </main>`;
-}
-
-renderApp();
+document.querySelectorAll(".chip").forEach((btn) => btn.addEventListener("click", () => {
+  req = { kind: "preset", period: btn.getAttribute("data-period") as PresetPeriod };
+  document.querySelectorAll(".chip").forEach((b) => b.classList.toggle("chip-active", b === btn));
+  void load();
+}));
+document.getElementById("applyCustom")?.addEventListener("click", () => {
+  req = { kind: "range", start: new Date(el.startDate.value + "T00:00:00"), end: new Date(el.endDate.value + "T23:59:59") };
+  document.querySelectorAll(".chip").forEach((b) => b.classList.remove("chip-active"));
+  void load();
+});
+document.getElementById("refreshBtn")?.addEventListener("click", () => void load());
+const today = new Date(); const weekAgo = new Date(today); weekAgo.setDate(weekAgo.getDate() - 7);
+const pad = (n: number) => String(n).padStart(2, "0");
+el.endDate.value = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+el.startDate.value = `${weekAgo.getFullYear()}-${pad(weekAgo.getMonth() + 1)}-${pad(weekAgo.getDate())}`;
+document.getElementById("refreshInfo")!.textContent = "USGS live data.";
+void load();
