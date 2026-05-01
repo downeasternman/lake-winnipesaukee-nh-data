@@ -35,7 +35,7 @@ app.innerHTML = `
     <article class="card"><header><h2>Inflow</h2><p class="meta" id="metaI"></p></header><div class="chart-wrap"><div class="loading" id="loadI">Loading…</div><canvas id="chartI" height="220"></canvas></div><p class="footnote" id="footI"></p></article>
     <article class="card"><header><h2>Outflow</h2><p class="meta" id="metaO"></p></header><div class="chart-wrap"><div class="loading" id="loadO">Loading…</div><canvas id="chartO" height="220"></canvas></div><p class="footnote" id="footO"></p></article>
   </main>
-  <footer class="app-footer"><p>Data: U.S. Geological Survey near real-time feeds. Temperature chart is always shown first.</p></footer>
+  <footer class="app-footer"><p>Data: U.S. Geological Survey near real-time feeds. Temperature chart is always shown first.</p><p class="app-footer-sponsor"><a href="https://github.com/sponsors/downeasternman" class="sponsor-link" target="_blank" rel="noreferrer">Sponsor</a></p></footer>
 `;
 
 let req: IvRequest = { kind: "preset", period: "P7D" };
